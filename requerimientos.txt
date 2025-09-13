@@ -1,0 +1,12 @@
+matplotlib
+numpy
+pyqtgraph
+pyserial
+python-dateutil
+Pillow
+cycler
+packaging
+contourpy
+fonttools
+kiwisolver
+pyparsing
