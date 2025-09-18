@@ -10,3 +10,4 @@ contourpy
 fonttools
 kiwisolver
 pyparsing
+pyqt5
