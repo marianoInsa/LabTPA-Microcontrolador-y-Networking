@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import numpy as np
 
 # para simular datos
 import threading
@@ -199,25 +200,27 @@ class SerialReader(QThread):
     def __init__(self, port, parent=None):
         QThread.__init__(self, parent)
 
-        # self.ser = serial.Serial(port, 115200, timeout=1)
-        self.ser = SimulatedSerial(port, 115200, timeout=1)
+        self.ser = serial.Serial(port, 115200, timeout=1)
+        # self.ser = SimulatedSerial(port, 115200, timeout=1)
         self.running = True
-        print(f"[SIMULADOR] Conectado al puerto simulado: {port}")
+        self.data_queue = deque(maxlen=100) # Add buffer
+        print(f"Conectado al puerto: {port}")
 
     def run(self):
         while self.running:
             try:
                 line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                data = self.parse_data(line)
-                if data:
-                    self.data_received.emit(data)
-                # [SIMULADOR] Agrego un tiempo entre lecturas de 100ms
-                time.sleep(0.1)
-            # except serial.SerialException as e:
-            #     print(f"Error de lectura serial: {e}")
-            #     self.running = False
+                if line:
+                    data = self.parse_data(line)
+                    if data:
+                        self.data_received.emit(data)
+                # [SIMULADOR] Agrego un tiempo entre lecturas
+                # time.sleep(DATA_COLLECTION_INTERVAL_MS / 1000.0)
+            except serial.SerialException as e:
+                print(f"Error de lectura serial: {e}")
+                self.running = False
             except Exception as e:
-                print(f"Error inesperado: {e}")
+                print(f"Error inesperado en lector serial: {e}")
                 continue
 
     def stop(self):
@@ -226,191 +229,384 @@ class SerialReader(QThread):
 
     def parse_data(self, line):
         # Expresión regular para capturar todos los campos
-        match = re.search(r"P:([\d.-]+),T:([\d.-]+),MV:([\d.-]+),SH:([\d.-]+),F:(\w+),M:(\w+),ESD:(\w+),ESTADO:([\w\s]+),RELIEF:(\w+),PURGE:(\w+)", line)
+        patron = r"P:([\d.-]+),T:([\d.-]+),MV:([\d.-]+),SH:([\d.-]+),F:(\w+),M:(\w+),ESD:(\w+),ESTADO:([\w\s]+),RELIEF:(\w+),PURGE:(\w+)"
+        match = re.search(patron, line)
         if match:
-            return {
-                'P': float(match.group(1)),
-                'T': float(match.group(2)),
-                'MV': float(match.group(3)),
-                'SH': float(match.group(4)),
-                'F': match.group(5),
-                'M': match.group(6),
-                'ESD': match.group(7),
-                'ESTADO': match.group(8),
-                'RELIEF': match.group(9),
-                'PURGE': match.group(10)
-            }
+            try:
+                return {
+                    'P': float(match.group(1)),
+                    'T': float(match.group(2)),
+                    'MV': float(match.group(3)),
+                    'SH': float(match.group(4)),
+                    'F': match.group(5),
+                    'M': match.group(6),
+                    'ESD': match.group(7),
+                    'ESTADO': match.group(8),
+                    'RELIEF': match.group(9),
+                    'PURGE': match.group(10)
+                }
+            except ValueError as e:
+                print(f"Error al convertir datos: {e}")
         return None
 
-# --- Ventana PyQt5 ---
+# ===============================================
+#         INTERFAZ GRÁFICA PyQt5
+# ===============================================
 class PlotterApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('VaporSur S.A. - Monitoreo del Sistema')
+        self.resize(1200, 800)
         self.layout = QVBoxLayout(self)
 
+        plt.style.use('fast')
         # Figura matplotlib con autoajuste
-        self.fig = plt.figure(figsize=(10, 8), constrained_layout=True)
-        gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1], figure=self.fig)
+        self.fig = plt.figure(figsize=(12, 8), constrained_layout=True)
+        self.fig.patch.set_facecolor('white')
 
+        gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1], figure=self.fig)
         self.ax1 = self.fig.add_subplot(gs[0])
         self.ax2 = self.fig.add_subplot(gs[1])
 
         self.canvas = FigureCanvas(self.fig)
+        self.canvas.setParent(self)
         self.layout.addWidget(self.canvas, stretch=1)
 
         self.labels = {}
         self.setup_labels()
-        self.setLayout(self.layout)
 
-        self.x_data = deque([0])
-        self.y1_data = deque([0])
-        self.y2_data = deque([0])
+        # self.x_data = np.arange(MAX_POINTS, dtype=np.float32)
+        # self.y1_data = np.zeros(MAX_POINTS, dtype=np.float32)
+        # self.y2_data = np.zeros(MAX_POINTS, dtype=np.float32)
+        # self.data_index = 0
+
+        # self.line1, self.line2 = self.init_plot(self.ax1, self.ax2)
+
+        # Configurar formato de tiempo en ejes
+        from matplotlib.ticker import FuncFormatter
+        
+        def time_formatter(x, pos):
+            """Formatea el tiempo en minutos:segundos"""
+            total_seconds = int(x)
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            return f"{minutes:02d}:{seconds:02d}"
+        
+        # Aplicar formateador a ambos ejes X
+        self.ax1.xaxis.set_major_formatter(FuncFormatter(time_formatter))
+        self.ax2.xaxis.set_major_formatter(FuncFormatter(time_formatter))
+        
+        # Datos optimizados con numpy y tiempo real
+        self.start_time = time.time()
+        self.x_data = np.zeros(MAX_POINTS, dtype=np.float32)  # Tiempo real
+        self.y1_data = np.zeros(MAX_POINTS, dtype=np.float32)
+        self.y2_data = np.zeros(MAX_POINTS, dtype=np.float32)
+        self.data_index = 0
+        self.current_time = 0
+        
+        # Inicialización de plots optimizada
         self.line1, self.line2 = self.init_plot(self.ax1, self.ax2)
+        
+
+        # timer para actualizar el plot
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_plots)
+        self.update_timer.start(GUI_UPDATE_INTERVAL_MS)
+
+        # buffer de datos recientes
+        self.recent_data = None
+        self.plot_dirty = False
 
         self.serial_thread = None
         self.start_serial()
 
     def start_serial(self):
         # PARA SIMULADOR
-        port = "SIMULADO_COM3"
-        print(f"[SIMULADOR] Iniciando con puerto simulado: {port}")
-        self.serial_thread = SerialReader(port)
-        self.serial_thread.data_received.connect(self.update_data)
-        self.serial_thread.start()
+        # port = "SIMULADO_COM3"
+        # print(f"[SIMULADOR] Iniciando con puerto simulado: {port}")
+        # self.serial_thread = SerialReader(port)
+        # self.serial_thread.data_received.connect(self.receive_data)
+        # self.serial_thread.start()
         
-        # port = self.find_port()
-        # if port:
-        #     print(f"Conectado a {port}")
-        #     self.serial_thread = SerialReader(port)
-        #     self.serial_thread.data_received.connect(self.update_data)
-        #     self.serial_thread.start()
-        # else:
-        #     print("No se encontró ningún dispositivo CircuitPython. Conéctalo y vuelve a intentar.")
-        #     sys.exit(1)
+        port = self.find_port()
+        if port:
+            print(f"Conectado a {port}")
+            self.serial_thread = SerialReader(port)
+            self.serial_thread.data_received.connect(self.receive_data)
+            self.serial_thread.start()
+        else:
+            print("No se encontró ningún dispositivo CircuitPython. Conéctalo y vuelve a intentar.")
+            sys.exit(1)
     
     # DESCOMENTAR PARA PUERTO REAL 
-    # def find_port(self):
-    #     ports = serial.tools.list_ports.comports()
-    #     for p in ports:
-    #         try:
-    #             ser = serial.Serial(p.device, 115200, timeout=1)
-    #             ser.close()
-    #             return p.device
-    #         except (serial.SerialException, OSError):
-    #             continue
-    #     return None
+    def find_port(self):
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            try:
+                ser = serial.Serial(p.device, 115200, timeout=1)
+                ser.close()
+                return p.device
+            except (serial.SerialException, OSError):
+                continue
+        return None
 
-    def setup_labels(self):
-        label_style = "font-size: 14px; font-weight: bold; color: #333;"
-        for key, text in [
-            ('status', "Estado del Sistema: OK"),
-            ('mode', "Modo: Presión"),
-            ('flow', "Estado del Flujo: None"),
-            ('values', "P: 0.0 kPa | T: 0.0 °C | MV: 0.0% | SH: 0.0%"),
-            ('esd', "ESD: Desactivado"),
-            ('relief', "Válvula de Alivio: No"),
-            ('purge', "Válvula de Purga: No")
-        ]:
-            self.labels[key] = QLabel(text)
-            self.labels[key].setStyleSheet(label_style)
-            self.layout.addWidget(self.labels[key], stretch=0)
-
-    def update_data(self, data):
-        p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
-
-        self.x_data.append(self.x_data[-1] + 1)
-        self.y1_data.append(p)
-        self.y2_data.append(t)
-
-        if len(self.x_data) > MAX_POINTS:
-            self.x_data.popleft()
-            self.y1_data.popleft()
-            self.y2_data.popleft()
-
-        self.line1.set_data(list(self.x_data), list(self.y1_data))
-        self.line2.set_data(list(self.x_data), list(self.y2_data))
-
-        self.ax1.set_xlim(self.x_data[0], self.x_data[-1])
-        self.ax2.set_xlim(self.x_data[0], self.x_data[-1])
+    def receive_data(self, data):
+        """Recibe datos y los almacena para actualización posterior"""
+        self.recent_data = data
+        self.plot_dirty = True
         
-        self.update_labels(data)
-        self.canvas.draw()
+        # Actualizar labels inmediatamente (más crítico para UX)
+        self.update_labels_immediate(data)
 
-    def update_labels(self, data):
-        p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
+        self.current_time = time.time() - self.start_time
         
-        self.labels['values'].setText(f"P: {p:.1f} kPa | T: {t:.1f} °C | MV: {mv:.1f}% | SH: {sh:.1f}%")
-        self.labels['mode'].setText(f"Modo: {mode}")
-        self.labels['flow'].setText(f"Estado del Flujo: {flow}")
-        self.labels['esd'].setText(f"ESD: {esd}")
-        self.labels['relief'].setText(f"Válvula de Alivio: {relief}")
-        self.labels['purge'].setText(f"Válvula de Purga: {purge}")
-        self.labels['status'].setText(f"Estado del Sistema: {estado}")
+        # Agregar datos al buffer circular
+        p, t = data['P'], data['T']
+        
+        # Usar indexing circular para mejor rendimiento
+        idx = self.data_index % MAX_POINTS
+        self.x_data[idx] = self.current_time
+        self.y1_data[idx] = p
+        self.y2_data[idx] = t
+        self.data_index += 1
 
+    def update_plots(self):
+        """Actualización optimizada de gráficos usando timer separado"""
+        if not self.plot_dirty or self.recent_data is None:
+            return
+            
+        try:
+            # Calcular rango de datos válidos
+            if self.data_index < MAX_POINTS:
+                # Caso inicial: menos datos que el buffer completo
+                valid_range = slice(0, self.data_index)
+                x_data = self.x_data[:self.data_index]
+                y1_data = self.y1_data[:self.data_index]
+                y2_data = self.y2_data[:self.data_index]
+            else:
+                # Caso normal: buffer lleno, ordenar datos cronológicamente
+                start_idx = self.data_index % MAX_POINTS
+
+                # Reordenar datos para mantener orden cronológico
+                if start_idx != 0:
+                    x_data = np.concatenate([self.x_data[start_idx:], self.x_data[:start_idx]])
+                    y1_data = np.concatenate([self.y1_data[start_idx:], self.y1_data[:start_idx]])
+                    y2_data = np.concatenate([self.y2_data[start_idx:], self.y2_data[:start_idx]])
+                else:
+                    x_data = self.x_data.copy()
+                    y1_data = self.y1_data.copy()
+                    y2_data = self.y2_data.copy()
+
+            # Actualizar líneas con tiempo real
+            self.line1.set_data(x_data, y1_data)
+            self.line2.set_data(x_data, y2_data)
+            
+            # Actualizar ventana de tiempo (últimos N segundos)
+            if len(x_data) > 0:
+                time_window = 60  # Mostrar últimos 60 segundos
+                current_time = x_data[-1] if len(x_data) > 0 else self.current_time
+                
+                # Ventana deslizante de tiempo
+                self.ax1.set_xlim(max(0, current_time - time_window), current_time + 5)
+                self.ax2.set_xlim(max(0, current_time - time_window), current_time + 5)
+            
+            # Autoescalado inteligente (solo cuando sea necesario)
+            if self.data_index % 20 == 0:  # Cada 20 puntos
+                self.smart_autoscale(y1_data, y2_data)
+            
+            # Actualizar canvas de manera eficiente
+            self.canvas.draw_idle()  # Más eficiente que draw()
+            self.plot_dirty = False
+            
+        except Exception as e:
+            print(f"Error actualizando gráficos: {e}")
+
+    def smart_autoscale(self, y1_data, y2_data):
+        """Autoescalado inteligente para mejor rendimiento"""
+        if len(y1_data) > 10:
+            # Usar percentiles para escalado robusto
+            y1_valid = y1_data[y1_data > 0]
+            y2_valid = y2_data[y2_data > 0]
+            
+            if len(y1_valid) > 0:
+                y1_min, y1_max = np.percentile(y1_valid, [5, 95])
+                margin1 = (y1_max - y1_min) * 0.1
+                self.ax1.set_ylim(y1_min - margin1, y1_max + margin1)
+            
+            if len(y2_valid) > 0:
+                y2_min, y2_max = np.percentile(y2_valid, [5, 95])
+                margin2 = (y2_max - y2_min) * 0.1
+                self.ax2.set_ylim(y2_min - margin2, y2_max + margin2)
+
+    def update_labels_immediate(self, data):
+        """Actualización inmediata y optimizada de labels"""
+        try:
+            p, t, mv, sh = data['P'], data['T'], data['MV'], data['SH']
+            flow, mode, esd, estado = data['F'], data['M'], data['ESD'], data['ESTADO']
+            relief, purge = data['RELIEF'], data['PURGE']
+            
+            # Calcular tiempo transcurrido
+            elapsed = int(self.current_time)
+            time_str = f"{elapsed//60:02d}:{elapsed%60:02d}"
+            
+            # Actualizar solo textos que han cambiado
+            new_values_text = f"P: {p:.1f} kPa | T: {t:.1f} °C | MV: {mv:.1f}% | SH: {sh:.1f}% | Tiempo: {time_str}"
+            if self.labels['values'].text() != new_values_text:
+                self.labels['values'].setText(new_values_text)
+            
+            # Actualizar otros labels de manera similar
+            self.labels['mode'].setText(f"Modo: {mode}")
+            self.labels['flow'].setText(f"Estado del Flujo: {flow}")
+            self.labels['esd'].setText(f"ESD: {esd}")
+            self.labels['relief'].setText(f"Válvula de Alivio: {relief}")
+            self.labels['purge'].setText(f"Válvula de Purga: {purge}")
+            self.labels['status'].setText(f"Estado del Sistema: {estado}")
+
+            # Actualización optimizada de estilos
+            self.update_label_styles(esd, estado)
+            
+        except Exception as e:
+            print(f"Error actualizando labels: {e}")
+
+    def update_label_styles(self, esd, estado):
+        """Actualización optimizada de estilos de labels"""
         if esd == 'Activado':
             self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
         else:
             self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
-            if "Advertencia" in estado or "Recuperación" in estado or "Precalentamiento" in estado:
+            if any(word in estado for word in ["Advertencia", "Recuperación", "Precalentamiento"]):
                 self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
-            elif "Alivio" in estado or "Purga" in estado:
+            elif any(word in estado for word in ["Alivio", "Purga"]):
                 self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
             else:
                 self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
 
+    def setup_labels(self):
+        """Setup optimizado de labels"""
+        label_style = "font-size: 14px; font-weight: bold; color: #fff; padding: 2px;"
+        labels_config = [
+            ('status', "Estado del Sistema: Iniciando..."),
+            ('mode', "Modo: --"),
+            ('flow', "Estado del Flujo: --"),
+            ('values', "P: -- kPa | T: -- °C | MV: --% | SH: --%"),
+            ('esd', "ESD: --"),
+            ('relief', "Válvula de Alivio: --"),
+            ('purge', "Válvula de Purga: --")
+        ]
+        
+        for key, text in labels_config:
+            self.labels[key] = QLabel(text)
+            self.labels[key].setStyleSheet(label_style)
+            self.layout.addWidget(self.labels[key], stretch=0)
+
+    # def update_data(self, data):
+    #     p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
+
+    #     self.x_data.append(self.x_data[-1] + 1)
+    #     self.y1_data.append(p)
+    #     self.y2_data.append(t)
+
+    #     if len(self.x_data) > MAX_POINTS:
+    #         self.x_data.popleft()
+    #         self.y1_data.popleft()
+    #         self.y2_data.popleft()
+
+    #     self.line1.set_data(list(self.x_data), list(self.y1_data))
+    #     self.line2.set_data(list(self.x_data), list(self.y2_data))
+
+    #     self.ax1.set_xlim(self.x_data[0], self.x_data[-1])
+    #     self.ax2.set_xlim(self.x_data[0], self.x_data[-1])
+        
+    #     self.update_labels(data)
+    #     self.canvas.draw()
+
+    # def update_labels(self, data):
+    #     p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
+        
+    #     self.labels['values'].setText(f"P: {p:.1f} kPa | T: {t:.1f} °C | MV: {mv:.1f}% | SH: {sh:.1f}%")
+    #     self.labels['mode'].setText(f"Modo: {mode}")
+    #     self.labels['flow'].setText(f"Estado del Flujo: {flow}")
+    #     self.labels['esd'].setText(f"ESD: {esd}")
+    #     self.labels['relief'].setText(f"Válvula de Alivio: {relief}")
+    #     self.labels['purge'].setText(f"Válvula de Purga: {purge}")
+    #     self.labels['status'].setText(f"Estado del Sistema: {estado}")
+
+    #     if esd == 'Activado':
+    #         self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
+    #         self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
+    #     else:
+    #         self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
+    #         if "Advertencia" in estado or "Recuperación" in estado or "Precalentamiento" in estado:
+    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
+    #         elif "Alivio" in estado or "Purga" in estado:
+    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
+    #         else:
+    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
+
     def init_plot(self, ax1, ax2):
-        ax1.set_xlim(0, MAX_POINTS)
-        ax1.set_ylim(100, 500)
-        ax1.set_title('Presión (kPa) vs Tiempo')
-        ax1.set_xlabel('Tiempo (s)')
-        ax1.set_ylabel('Presión (kPa)')
-        ax1.grid(True)
+        """Inicialización optimizada de plots"""
+        ax1.set_xlim(0, 60) # Ventana inicial de 60 segundos
+        ax1.set_ylim(200, 400)
+        ax1.set_title('Presión (kPa) vs Tiempo', fontsize=12, pad=10)
+        ax1.set_xlabel('Tiempo (s)', fontsize=10)
+        ax1.set_ylabel('Presión (kPa)', fontsize=10)
+        ax1.grid(True, alpha=0.3)
 
-        ax2.set_xlim(0, MAX_POINTS)
-        ax2.set_ylim(50, 200)
-        ax2.set_title('Temperatura (°C) vs Tiempo')
-        ax2.set_xlabel('Tiempo (s)')
-        ax2.set_ylabel('Temperatura (°C)')
-        ax2.grid(True)
+        ax2.set_xlim(0, 60)
+        ax2.set_ylim(100, 180)
+        ax2.set_title('Temperatura (°C) vs Tiempo', fontsize=12, pad=10)
+        ax2.set_xlabel('Tiempo (s)', fontsize=10)
+        ax2.set_ylabel('Temperatura (°C)', fontsize=10)
+        ax2.grid(True, alpha=0.3)
 
-        line1, = ax1.plot([], [], lw=2)
-        line2, = ax2.plot([], [], lw=2, color='orange')
+        line1, = ax1.plot([], [], lw=2, color='#2E86AB', alpha=0.8)
+        line2, = ax2.plot([], [], lw=2, color='#F24236', alpha=0.8)
 
         # --- Áreas unificadas ---
-        ax1.axhspan(FLOW_A_P_RANGE[0], FLOW_A_P_RANGE[1], facecolor=COLOR_FLOW_A, alpha=0.3, label='Flujo A')
-        ax1.axhspan(FLOW_B_P_RANGE[0], FLOW_B_P_RANGE[1], facecolor=COLOR_FLOW_B, alpha=0.3, label='Flujo B')
-        ax2.axhspan(FLOW_A_T_RANGE[0], FLOW_A_T_RANGE[1], facecolor=COLOR_FLOW_A, alpha=0.3, label='Flujo A')
-        ax2.axhspan(FLOW_B_T_RANGE[0], FLOW_B_T_RANGE[1], facecolor=COLOR_FLOW_B, alpha=0.3, label='Flujo B')
+        ax1.axhspan(FLOW_A_P_RANGE[0], FLOW_A_P_RANGE[1], facecolor=COLOR_FLOW_A, alpha=0.2, label='Flujo A')
+        ax1.axhspan(FLOW_B_P_RANGE[0], FLOW_B_P_RANGE[1], facecolor=COLOR_FLOW_B, alpha=0.2, label='Flujo B')
+        ax2.axhspan(FLOW_A_T_RANGE[0], FLOW_A_T_RANGE[1], facecolor=COLOR_FLOW_A, alpha=0.2, label='Flujo A')
+        ax2.axhspan(FLOW_B_T_RANGE[0], FLOW_B_T_RANGE[1], facecolor=COLOR_FLOW_B, alpha=0.2, label='Flujo B')
 
         # Líneas de referencia
-        ax1.axhline(P_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=2, label='Emergencia (Alta)')
-        ax1.axhline(P_RECOVERY, color=COLOR_ALERT_LINE, linestyle='--', lw=2, label='Recuperación (Baja)')
-        ax2.axhline(T_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=2, label='Emergencia (Alta)')
-        ax2.axhline(T_PREHEAT, color=COLOR_ALERT_LINE, linestyle='--', lw=2, label='Precalentamiento (Baja)')
+        ax1.axhline(P_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Emergencia (Alta)')
+        ax1.axhline(P_RECOVERY, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Recuperación (Baja)')
+        ax2.axhline(T_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Emergencia (Alta)')
+        ax2.axhline(T_PREHEAT, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Precalentamiento (Baja)')
 
-        ax1.legend(loc='upper left', bbox_to_anchor=(1, 1))
-        ax2.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        ax1.legend(loc='upper right', fontsize=8, framealpha=0.8)
+        ax2.legend(loc='upper right', fontsize=8, framealpha=0.8)
 
         return line1, line2
 
     def closeEvent(self, event):
+        """Cierre"""
+        print("Cerrando aplicación...")
+        if self.update_timer:
+            self.update_timer.stop()
         if self.serial_thread:
             self.serial_thread.stop()
-            self.serial_thread.wait()
+            self.serial_thread.wait(3000)
         event.accept()
 
 def main():
     print("=== VAPORSUR S.A. - SIMULADOR INTEGRADO ===")
     print("Iniciando interfaz con simulador de Raspberry Pi Pico 2 W")
     print("Los datos mostrados son simulados para pruebas")
+    print("Configuración:")
+    print(f"  - Actualización GUI: {GUI_UPDATE_INTERVAL_MS}ms ({1000//GUI_UPDATE_INTERVAL_MS} FPS)")
+    print(f"  - Recolección datos: {DATA_COLLECTION_INTERVAL_MS}ms")
+    print(f"  - Buffer de datos: {MAX_POINTS} puntos")
     print("=" * 50)
 
 
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+
     window = PlotterApp()
     window.show()
+    
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
