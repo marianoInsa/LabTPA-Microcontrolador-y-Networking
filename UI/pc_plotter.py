@@ -20,7 +20,7 @@ import math
 MAX_POINTS = 200
 GUI_UPDATE_INTERVAL_MS = 50
 DATA_COLLECTION_INTERVAL_MS = 100
-PLOT_UPDATE_INTERVAL_MS = 10
+# PLOT_UPDATE_INTERVAL_MS = 10
 
 # Rangos y umbrales
 P_WARN_HIGH = 380.0
@@ -190,6 +190,7 @@ class SimulatedSerial:
 #         FIN DEL CODIGO DEL SIMULADOR
 # ===============================================
 
+simulador = True
 
 # ===============================================
 #         LECTURA SERIAL
@@ -200,8 +201,10 @@ class SerialReader(QThread):
     def __init__(self, port, parent=None):
         QThread.__init__(self, parent)
 
-        self.ser = serial.Serial(port, 115200, timeout=1)
-        # self.ser = SimulatedSerial(port, 115200, timeout=1)
+        if simulador:
+            self.ser = SimulatedSerial(port, 115200, timeout=1)
+        else:
+            self.ser = serial.Serial(port, 115200, timeout=1)
         self.running = True
         self.data_queue = deque(maxlen=100) # Add buffer
         print(f"Conectado al puerto: {port}")
@@ -214,8 +217,9 @@ class SerialReader(QThread):
                     data = self.parse_data(line)
                     if data:
                         self.data_received.emit(data)
-                # [SIMULADOR] Agrego un tiempo entre lecturas
-                # time.sleep(DATA_COLLECTION_INTERVAL_MS / 1000.0)
+                if simulador:
+                    # [SIMULADOR] Agrego un tiempo entre lecturas
+                    time.sleep(DATA_COLLECTION_INTERVAL_MS / 1000.0)
             except serial.SerialException as e:
                 print(f"Error de lectura serial: {e}")
                 self.running = False
@@ -321,24 +325,25 @@ class PlotterApp(QWidget):
         self.start_serial()
 
     def start_serial(self):
-        # PARA SIMULADOR
-        # port = "SIMULADO_COM3"
-        # print(f"[SIMULADOR] Iniciando con puerto simulado: {port}")
-        # self.serial_thread = SerialReader(port)
-        # self.serial_thread.data_received.connect(self.receive_data)
-        # self.serial_thread.start()
         
-        port = self.find_port()
-        if port:
-            print(f"Conectado a {port}")
+        if simulador:
+            # PARA SIMULADOR
+            port = "SIMULADO_COM3"
+            print(f"[SIMULADOR] Iniciando con puerto simulado: {port}")
             self.serial_thread = SerialReader(port)
             self.serial_thread.data_received.connect(self.receive_data)
             self.serial_thread.start()
         else:
-            print("No se encontró ningún dispositivo CircuitPython. Conéctalo y vuelve a intentar.")
-            sys.exit(1)
-    
-    # DESCOMENTAR PARA PUERTO REAL 
+            port = self.find_port()
+            if port:
+                print(f"Conectado a {port}")
+                self.serial_thread = SerialReader(port)
+                self.serial_thread.data_received.connect(self.receive_data)
+                self.serial_thread.start()
+            else:
+                print("No se encontró ningún dispositivo CircuitPython. Conéctalo y vuelve a intentar.")
+                sys.exit(1)
+
     def find_port(self):
         ports = serial.tools.list_ports.comports()
         for p in ports:
@@ -411,8 +416,8 @@ class PlotterApp(QWidget):
                 self.ax2.set_xlim(max(0, current_time - time_window), current_time + 5)
             
             # Autoescalado inteligente (solo cuando sea necesario)
-            if self.data_index % 20 == 0:  # Cada 20 puntos
-                self.smart_autoscale(y1_data, y2_data)
+            # if self.data_index % 20 == 0:  # Cada 20 puntos
+            #     self.smart_autoscale(y1_data, y2_data)
             
             # Actualizar canvas de manera eficiente
             self.canvas.draw_idle()  # Más eficiente que draw()
@@ -500,61 +505,17 @@ class PlotterApp(QWidget):
             self.labels[key].setStyleSheet(label_style)
             self.layout.addWidget(self.labels[key], stretch=0)
 
-    # def update_data(self, data):
-    #     p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
-
-    #     self.x_data.append(self.x_data[-1] + 1)
-    #     self.y1_data.append(p)
-    #     self.y2_data.append(t)
-
-    #     if len(self.x_data) > MAX_POINTS:
-    #         self.x_data.popleft()
-    #         self.y1_data.popleft()
-    #         self.y2_data.popleft()
-
-    #     self.line1.set_data(list(self.x_data), list(self.y1_data))
-    #     self.line2.set_data(list(self.x_data), list(self.y2_data))
-
-    #     self.ax1.set_xlim(self.x_data[0], self.x_data[-1])
-    #     self.ax2.set_xlim(self.x_data[0], self.x_data[-1])
-        
-    #     self.update_labels(data)
-    #     self.canvas.draw()
-
-    # def update_labels(self, data):
-    #     p, t, mv, sh, flow, mode, esd, estado, relief, purge = data.values()
-        
-    #     self.labels['values'].setText(f"P: {p:.1f} kPa | T: {t:.1f} °C | MV: {mv:.1f}% | SH: {sh:.1f}%")
-    #     self.labels['mode'].setText(f"Modo: {mode}")
-    #     self.labels['flow'].setText(f"Estado del Flujo: {flow}")
-    #     self.labels['esd'].setText(f"ESD: {esd}")
-    #     self.labels['relief'].setText(f"Válvula de Alivio: {relief}")
-    #     self.labels['purge'].setText(f"Válvula de Purga: {purge}")
-    #     self.labels['status'].setText(f"Estado del Sistema: {estado}")
-
-    #     if esd == 'Activado':
-    #         self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
-    #         self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
-    #     else:
-    #         self.labels['esd'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
-    #         if "Advertencia" in estado or "Recuperación" in estado or "Precalentamiento" in estado:
-    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
-    #         elif "Alivio" in estado or "Purga" in estado:
-    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: red;")
-    #         else:
-    #             self.labels['status'].setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
-
     def init_plot(self, ax1, ax2):
         """Inicialización optimizada de plots"""
         ax1.set_xlim(0, 60) # Ventana inicial de 60 segundos
-        ax1.set_ylim(200, 400)
+        ax1.set_ylim(150, 500)
         ax1.set_title('Presión (kPa) vs Tiempo', fontsize=12, pad=10)
         ax1.set_xlabel('Tiempo (s)', fontsize=10)
         ax1.set_ylabel('Presión (kPa)', fontsize=10)
         ax1.grid(True, alpha=0.3)
 
         ax2.set_xlim(0, 60)
-        ax2.set_ylim(100, 180)
+        ax2.set_ylim(80, 220)
         ax2.set_title('Temperatura (°C) vs Tiempo', fontsize=12, pad=10)
         ax2.set_xlabel('Tiempo (s)', fontsize=10)
         ax2.set_ylabel('Temperatura (°C)', fontsize=10)
@@ -570,10 +531,14 @@ class PlotterApp(QWidget):
         ax2.axhspan(FLOW_B_T_RANGE[0], FLOW_B_T_RANGE[1], facecolor=COLOR_FLOW_B, alpha=0.2, label='Flujo B')
 
         # Líneas de referencia
-        ax1.axhline(P_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Emergencia (Alta)')
-        ax1.axhline(P_RECOVERY, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Recuperación (Baja)')
-        ax2.axhline(T_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Emergencia (Alta)')
-        ax2.axhline(T_PREHEAT, color=COLOR_ALERT_LINE, linestyle='--', lw=1.5, alpha=0.7, label='Precalentamiento (Baja)')
+        ax1.axhline(P_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=2, alpha=0.8, label='Emergencia (460)')
+        ax1.axhline(P_WARN_HIGH, color='orange', linestyle='--', lw=1.5, alpha=0.7, label='Advertencia (380)')
+        ax1.axhline(P_RECOVERY, color='blue', linestyle='--', lw=1.5, alpha=0.7, label='Recuperación (220)')
+        
+        ax2.axhline(T_EMERG_HIGH, color=COLOR_ALERT_LINE, linestyle='--', lw=2, alpha=0.8, label='Emergencia (190)')
+        ax2.axhline(T_WARN_HIGH, color='orange', linestyle='--', lw=1.5, alpha=0.7, label='Advertencia (170)')
+        ax2.axhline(T_PREHEAT, color='blue', linestyle='--', lw=1.5, alpha=0.7, label='Precalent. (110)')
+
 
         ax1.legend(loc='upper right', fontsize=8, framealpha=0.8)
         ax2.legend(loc='upper right', fontsize=8, framealpha=0.8)
