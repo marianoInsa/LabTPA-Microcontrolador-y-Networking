@@ -1,5 +1,4 @@
 # code.py - VaporSur S.A. (CircuitPython)
-# Lógica de seguridad para ESD redefinida para control de retorno a valores iniciales.
 
 import board
 import digitalio
@@ -8,6 +7,47 @@ import pwmio
 import time
 import math
 import sys
+
+import json
+import time
+import wifi
+import socketpool
+import adafruit_minimqtt.adafruit_minimqtt as MQTT
+
+# Configuración de RED
+SSID = "Tu wifi"
+PASSWORD = "Contraseña de tu wifi"
+BROKER = "La IPv4 de la pc donde corre mosquitto. Win: ipconfig o Linux: ip addr"  
+NOMBRE_EQUIPO = "automatas"
+DESCOVERY_TOPIC = "descubrir"
+TOPIC = f"sensores/{NOMBRE_EQUIPO}"
+
+print(f"Intentando conectar a {SSID}...")
+try:
+    wifi.radio.connect(SSID, PASSWORD)
+    print(f"Conectado a {SSID}")
+    print(f"Dirección IP: {wifi.radio.ipv4_address}")
+except Exception as e:
+    print(f"Error al conectar a WiFi: {e}")
+    while True:
+        pass 
+
+# Configuración MQTT 
+pool = socketpool.SocketPool(wifi.radio)
+
+def connect(client, userdata, flags, rc):
+    print("Conectado al broker MQTT")
+    client.publish(DESCOVERY_TOPIC, json.dumps({"equipo":NOMBRE_EQUIPO,"magnitudes": ["presión", "temperatura"]}))
+
+mqtt_client = MQTT.MQTT(
+    broker=BROKER,
+    port=1883,
+    socket_pool=pool
+)
+
+mqtt_client.on_connect = connect
+mqtt_client.connect()
+
 
 # ----------------- PIN CONFIG -----------------
 # Encoder
@@ -135,6 +175,27 @@ standby_duration = 3.0
 start_time = time.monotonic()
 
 last_enc_pos = encoder.position
+
+# Usamos estas varaibles globales para controlar cada cuanto publicamos
+LAST_PUB = 0
+PUB_INTERVAL = 5
+
+def publish():
+    global last_pub
+    now = time.monotonic()
+   
+    if now - last_pub >= PUB_INTERVAL:
+        try:
+            pres_topic = f"{TOPIC}/presión" 
+            mqtt_client.publish(pres_topic, str([P_sim_kPa]))
+            
+            temp_topic = f"{TOPIC}/temperatura" 
+            mqtt_client.publish(temp_topic, str([T_sim]))
+            
+            last_pub = now
+          
+        except Exception as e:
+            print(f"Error publicando MQTT: {e}")
 
 def pwm_set_pct(pwm_obj, pct):
     pct = max(0.0, min(100.0, pct))
@@ -423,4 +484,6 @@ while True:
         print(output_data)
         last_log = now
         
+        publish()
+
     time.sleep(0.01)
