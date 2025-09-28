@@ -282,14 +282,18 @@ while True:
             else:
                 if (not sw_state) and (now - last_enc_sw_time) * 1000.0 > SW_DEBOUNCE_MS:
                     mode = 1 - mode
-                    if mode == 0:
-                        for _ in range(2):
-                            set_rgb(255, 255, 255); time.sleep(0.08)
-                            set_rgb(0, 160, 0); time.sleep(0.06)
-                    else:
-                        for _ in range(2):
-                            set_rgb(0, 120, 200); time.sleep(0.08)
-                            set_rgb(0, 160, 0); time.sleep(0.06)
+                    if mode == 0: # Modo Presión
+                        for _ in range(3):
+                            set_rgb_color(RGB_WHITE)
+                            time.sleep(0.08)
+                            set_rgb_color(RGB_GREEN)
+                            time.sleep(0.06)
+                    else: # Modo Temperatura
+                        for _ in range(3): 
+                            set_rgb_color(RGB_BLUE)
+                            time.sleep(0.08)
+                            set_rgb_color(RGB_GREEN)
+                            time.sleep(0.06)
                     time.sleep(0.15)
                     last_enc_sw_time = now
 
