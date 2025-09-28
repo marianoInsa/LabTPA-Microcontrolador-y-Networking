@@ -63,6 +63,15 @@ rgb_r = pwmio.PWMOut(RGB_R_PIN, frequency=5000, duty_cycle=0)
 rgb_g = pwmio.PWMOut(RGB_G_PIN, frequency=5000, duty_cycle=0)
 rgb_b = pwmio.PWMOut(RGB_B_PIN, frequency=5000, duty_cycle=0)
 
+# ----------------- COLORES RGB ESTANDARIZADOS -----------------
+RGB_GREEN = (0, 255, 0)      # Verde: Estado Normal
+RGB_ORANGE = (255, 165, 0)   # Naranja: Advertencias  
+RGB_RED = (255, 0, 0)        # Rojo: Emergencias/Crítico
+RGB_CYAN = (0, 255, 255)     # Cian: Recuperación/Precalentamiento
+RGB_WHITE = (255, 255, 255)  # Blanco: Cambio de modo
+RGB_BLUE = (0, 100, 255)     # Azul: Modo temperatura
+RGB_OFF = (0, 0, 0)          # Apagado
+
 # ----------------- SIMULATION & CONTROL PARAMETERS -----------------
 # Valores iniciales y de destino en modo ESD
 P_INITIAL = 300.0
@@ -135,6 +144,53 @@ def set_rgb(r8, g8, b8):
     rgb_r.duty_cycle = int((r8 / 255.0) * 65535)
     rgb_g.duty_cycle = int((g8 / 255.0) * 65535)
     rgb_b.duty_cycle = int((b8 / 255.0) * 65535)
+
+def set_rgb_color(color_tuple):
+    set_rgb(color_tuple[0], color_tuple[1], color_tuple[2])
+
+def determine_system_color(estado_sistema, P_sim_kPa, T_sim, mode, esd_active, esd_ready_to_reset, now):
+    # Modo ESD
+    if esd_active:
+        if esd_ready_to_reset:
+            return RGB_GREEN  # Verde: listo para reinicio
+        else:
+            # Parpadeo rojo en modo ESD
+            if int(now * 2) % 2 == 0:
+                return RGB_RED
+            else:
+                return RGB_OFF
+    
+    # Estados críticos
+    if "Alivio" in estado_sistema or "Purga" in estado_sistema:
+        return RGB_RED
+    
+    if "Emergencia" in estado_sistema:
+        return RGB_RED
+    
+    # Estados de recuperación/precalentamiento
+    if "Recuperación" in estado_sistema or "Precalentamiento" in estado_sistema:
+        return RGB_CYAN
+    
+    # Estados de advertencia
+    if "Advertencia" in estado_sistema:
+        return RGB_ORANGE
+    
+    # Valores criticos
+    if P_sim_kPa >= P_EMERG_HIGH:
+        return RGB_RED
+    
+    if T_sim >= T_EMERG_HIGH:
+        return RGB_RED
+        
+    # Advertencias
+    if P_sim_kPa >= P_WARN_HIGH or P_sim_kPa <= P_WARN_LOW:
+        return RGB_ORANGE
+    
+    if T_sim >= T_WARN_HIGH or T_sim <= T_WARN_LOW:
+        return RGB_ORANGE
+    
+    # Estado normal
+    return RGB_GREEN
 
 print("VaporSur - Iniciando firmware")
 
@@ -241,42 +297,22 @@ while True:
             relief_activo = "No"
             do_purga_a.value = False
             purga_activa = "No"
-            
-            # Se elimina la lógica de reducción forzada
-            # if P_sim_kPa >= P_EMERG_HIGH:
-            #     do_relief.value = True
-            #     relief_activo = "Si"
-            #     P_sim_kPa = P_RELIEF_TARGET
-            #     standby_start_time = now
-            #     estado_sistema = "Alivio Presión"
-            
-            # if T_sim >= T_PURGE_TRIGGER:
-            #     do_purga_a.value = True
-            #     purga_activa = "Si"
-            #     T_sim = 150.0
-            #     standby_start_time = now
-            #     estado_sistema = "Purga de Condensado"
 
-            if do_relief.value or do_purga_a.value:
-                set_rgb(200, 0, 0)
-            elif pressure_recovery_active or preheat_active:
-                set_rgb(0, 255, 255)
-            elif mode == 0:
-                if P_sim_kPa >= P_WARN_HIGH or P_sim_kPa <= P_WARN_LOW:
-                    set_rgb(200, 140, 0)
-                    estado_sistema = "Advertencia Presión"
-                else:
-                    set_rgb(0, 160, 0)
+            if mode == 0:  # Modo Presión
+                if P_sim_kPa >= P_WARN_HIGH:
+                    estado_sistema = "Advertencia Presión Alta"
+                elif P_sim_kPa <= P_WARN_LOW:
+                    estado_sistema = "Advertencia Presión Baja"
+                elif not pressure_recovery_active and not preheat_active:
                     estado_sistema = "Normal"
-            elif mode == 1:
-                if T_sim >= T_EMERG_HIGH or T_sim <= T_WARN_LOW:
-                    set_rgb(200, 0, 0)
-                    estado_sistema = "Corrección Temperatura"
+            else:  # Modo Temperatura
+                if T_sim >= T_EMERG_HIGH:
+                    estado_sistema = "Emergencia Temperatura"
                 elif T_sim >= T_WARN_HIGH:
-                    set_rgb(200, 140, 0)
-                    estado_sistema = "Advertencia Temperatura"
-                else:
-                    set_rgb(0, 160, 0)
+                    estado_sistema = "Advertencia Temperatura Alta"
+                elif T_sim <= T_WARN_LOW:
+                    estado_sistema = "Advertencia Temperatura Baja"
+                elif not pressure_recovery_active and not preheat_active:
                     estado_sistema = "Normal"
 
             flow_state = "None"
@@ -315,10 +351,12 @@ while True:
                 MV_pct = 50.0
                 # Aumentamos la tasa de disminución de la presión
                 P_sim_kPa -= (current_P - P_INITIAL) * dt * 0.2 
+                estado_sistema = "ESD: Reduciendo Presión"
             else: 
                 do_relief.value = False
                 relief_activo = "No"
                 MV_pct = 0.0
+                estado_sistema = "ESD: Aumentando Presión"
         else:
             do_relief.value = False
             relief_activo = "No"
@@ -331,11 +369,13 @@ while True:
                 purga_activa = "Si"
                 SH_cmd = 50.0
                 # Aumentamos la tasa de disminución de la temperatura
-                T_sim -= (current_T - T_INITIAL) * dt * 0.2 
+                T_sim -= (current_T - T_INITIAL) * dt * 0.2
+                estado_sistema = "ESD: Reduciendo Temperatura"
             else: 
                 do_purga_a.value = False
                 purga_activa = "No"
                 SH_cmd = 100.0
+                estado_sistema = "ESD: Aumentando Temperatura"
         else:
             do_purga_a.value = False
             purga_activa = "No"
@@ -343,7 +383,7 @@ while True:
 
         if abs(P_sim_kPa - P_INITIAL) <= ESD_P_TOLERANCE and abs(T_sim - T_INITIAL) <= ESD_T_TOLERANCE:
             esd_ready_to_reset = True
-            estado_sistema = "Listo para el Reinicio"
+            estado_sistema = "ESD: Listo para el Reinicio"
             
         if MV_pct < 50.0:
             P_sim_kPa += (50.0 - MV_pct) * dt * 0.1
@@ -358,18 +398,23 @@ while True:
         P_sim_kPa = max(P_sim_kPa, 0)
         T_sim = max(T_sim, 0)
 
-        if esd_ready_to_reset:
-            set_rgb(0, 160, 0)
-        else:
-            if int(now * 2) % 2 == 0: set_rgb(200, 0, 0)
-            else: set_rgb(0, 0, 0)
-        
         do_flow.value = False
         do_laser.value = do_relief.value or do_purga_a.value
 
+    rgb_color = determine_system_color(estado_sistema, P_sim_kPa, T_sim, mode, esd_active, esd_ready_to_reset, now)
+    
+    set_rgb_color(rgb_color)
+
     if now - last_log > 0.1:
+        flow_state_var = flow_state if 'flow_state' in locals() else "None"
         output_data = "P:{:.1f},T:{:.1f},MV:{:.1f},SH:{:.1f},F:{},M:{},ESD:{},ESTADO:{},RELIEF:{},PURGE:{}".format(
-            P_sim_kPa, T_sim, MV_pct, SH_cmd, flow_state if 'flow_state' in locals() else "None", MODE_NAMES[mode], "Activado" if esd_active else "Desactivado", estado_sistema, relief_activo, purga_activa
+            P_sim_kPa, T_sim, MV_pct, SH_cmd,
+            flow_state_var,
+            MODE_NAMES[mode],
+            "Activado" if esd_active else "Desactivado",
+            estado_sistema,
+            relief_activo,
+            purga_activa
         )
         print(output_data)
         last_log = now

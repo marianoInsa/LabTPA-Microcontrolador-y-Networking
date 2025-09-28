@@ -1,6 +1,5 @@
 # code.py - VaporSur S.A. (CircuitPython)
-# Sistema de Control y Supervisión para Plantas de Vapor
-# Lógica de seguridad ESD (Emergency Shutdown) con control de retorno a valores iniciales
+# Lógica de seguridad para ESD redefinida para control de retorno a valores iniciales.
 
 import board
 import digitalio
@@ -10,534 +9,369 @@ import time
 import math
 import sys
 
-# =================================================================
-# CONFIGURACIÓN DE PINES DEL MICROCONTROLADOR
-# =================================================================
+# ----------------- PIN CONFIG -----------------
+# Encoder
+ENC_CLK = board.GP3   # CLK (A)
+ENC_DT = board.GP4    # DT (B)
+ENC_SW = board.GP5    # SW (encoder push) -> cambia modo
 
-# --- ENCODER ROTATIVO (KY-040) ---
-# Permite ajustar presión y temperatura según modo seleccionado
-ENC_CLK = board.GP3   # CLK (señal A del encoder)
-ENC_DT = board.GP4    # DT (señal B del encoder)  
-ENC_SW = board.GP5    # SW (botón integrado para cambio de modo)
-
-# --- BOTÓN DE PARO DE EMERGENCIA (KY-004) ---
-# Activa/desactiva el sistema ESD
+# E-Stop button (KY-004)
 BTN_ESD_PIN = board.GP0
 
-# --- SALIDAS DIGITALES SIMULADAS ---
-# Representan actuadores del sistema de vapor
-LED_FLUJO_PIN = board.GP8      # LED indicador de flujo de distribución
-PIN_LASER = board.GP9          # Láser (indica activación de válvulas)
-PIN_ALIVIO = board.GP10        # Válvula de alivio de presión (simulada)
-PIN_PURGA_A = board.GP11       # Sistema de purga rama A (simulado)
-PIN_PURGA_B = board.GP12       # Sistema de purga rama B (simulado)
+# Outputs
+GP_FLOW_LED = board.GP8      # LED simple indicador de flujo
+GP_LASER = board.GP9       # Laser control (via transistor)
+GP_RELIEF = board.GP10      # Alivio (simulado como DO)
+GP_PURGA_A = board.GP11      # Purga A (simulado)
+GP_PURGA_B = board.GP12      # Purga B (simulado)
 
-# --- SALIDAS PWM PARA CONTROL ANALÓGICO ---
-# Simulan señales de control para válvulas modulantes
-PWM_VALVULA_MODULANTE_PIN = board.GP6    # Control de válvula modulante (presión)
-PWM_SUPERCALENTADOR_PIN = board.GP7      # Control del supercalentador (temperatura)
+# PWM outputs
+PWM_MV_PIN = board.GP6      # Válvula modulante (PWM AO simulado)
+PWM_SH_PIN = board.GP7      # Superheater control (PWM)
 
-# --- LED RGB PARA INDICACIÓN DE ESTADOS (KY-016) ---
-# Señalización visual del estado del sistema
-RGB_ROJO_PIN = board.GP13      # Canal rojo
-RGB_VERDE_PIN = board.GP14     # Canal verde
-RGB_AZUL_PIN = board.GP15      # Canal azul
+# RGB LED (cátodo común a GND)
+RGB_R_PIN = board.GP13
+RGB_G_PIN = board.GP14
+RGB_B_PIN = board.GP15
 
-# =================================================================
-# INICIALIZACIÓN DE OBJETOS DE HARDWARE
-# =================================================================
-
-# --- CONFIGURACIÓN DEL ENCODER ROTATIVO ---
+# ----------------- HARDWARE OBJECTS -----------------
 encoder = rotaryio.IncrementalEncoder(ENC_CLK, ENC_DT)
-boton_encoder = digitalio.DigitalInOut(ENC_SW)
-boton_encoder.direction = digitalio.Direction.INPUT
-boton_encoder.pull = digitalio.Pull.UP
+enc_sw = digitalio.DigitalInOut(ENC_SW)
+enc_sw.direction = digitalio.Direction.INPUT
+enc_sw.pull = digitalio.Pull.UP
 
-# --- CONFIGURACIÓN DEL BOTÓN ESD ---
-boton_esd = digitalio.DigitalInOut(BTN_ESD_PIN)
-boton_esd.direction = digitalio.Direction.INPUT
-boton_esd.pull = digitalio.Pull.UP
+btn_esd = digitalio.DigitalInOut(BTN_ESD_PIN)
+btn_esd.direction = digitalio.Direction.INPUT
+btn_esd.pull = digitalio.Pull.UP
 
-# --- FUNCIÓN AUXILIAR PARA CREAR SALIDAS DIGITALES ---
-def crear_salida_digital(pin):
-    """Crea y configura una salida digital en estado bajo"""
-    salida = digitalio.DigitalInOut(pin)
-    salida.direction = digitalio.Direction.OUTPUT
-    salida.value = False
-    return salida
+def make_do(pin):
+    d = digitalio.DigitalInOut(pin)
+    d.direction = digitalio.Direction.OUTPUT
+    d.value = False
+    return d
 
-# --- CONFIGURACIÓN DE SALIDAS DIGITALES ---
-led_flujo = crear_salida_digital(LED_FLUJO_PIN)
-laser_indicador = crear_salida_digital(PIN_LASER)
-valvula_alivio = crear_salida_digital(PIN_ALIVIO)
-sistema_purga_a = crear_salida_digital(PIN_PURGA_A)
-sistema_purga_b = crear_salida_digital(PIN_PURGA_B)
+do_flow = make_do(GP_FLOW_LED)
+do_laser = make_do(GP_LASER)
+do_relief = make_do(GP_RELIEF)
+do_purga_a = make_do(GP_PURGA_A)
+do_purga_b = make_do(GP_PURGA_B)
 
-# --- CONFIGURACIÓN DE SALIDAS PWM ---
-pwm_valvula_modulante = pwmio.PWMOut(PWM_VALVULA_MODULANTE_PIN, frequency=5000, duty_cycle=0)
-pwm_supercalentador = pwmio.PWMOut(PWM_SUPERCALENTADOR_PIN, frequency=5000, duty_cycle=0)
+pwm_mv = pwmio.PWMOut(PWM_MV_PIN, frequency=5000, duty_cycle=0)
+pwm_sh = pwmio.PWMOut(PWM_SH_PIN, frequency=5000, duty_cycle=0)
 
-# --- CONFIGURACIÓN DEL LED RGB ---
-rgb_rojo = pwmio.PWMOut(RGB_ROJO_PIN, frequency=5000, duty_cycle=0)
-rgb_verde = pwmio.PWMOut(RGB_VERDE_PIN, frequency=5000, duty_cycle=0)
-rgb_azul = pwmio.PWMOut(RGB_AZUL_PIN, frequency=5000, duty_cycle=0)
+rgb_r = pwmio.PWMOut(RGB_R_PIN, frequency=5000, duty_cycle=0)
+rgb_g = pwmio.PWMOut(RGB_G_PIN, frequency=5000, duty_cycle=0)
+rgb_b = pwmio.PWMOut(RGB_B_PIN, frequency=5000, duty_cycle=0)
 
-# =================================================================
-# PARÁMETROS DE SIMULACIÓN Y CONTROL DEL SISTEMA
-# =================================================================
+# ----------------- SIMULATION & CONTROL PARAMETERS -----------------
+# Valores iniciales y de destino en modo ESD
+P_INITIAL = 300.0
+T_INITIAL = 150.0
 
-# --- VALORES INICIALES DEL SISTEMA ---
-# Condiciones de operación estable según especificaciones VaporSur
-PRESION_INICIAL = 300.0      # kPa - Presión de referencia
-TEMPERATURA_INICIAL = 150.0  # °C - Temperatura de referencia
+P_sim_kPa = P_INITIAL
+T_sim = T_INITIAL
 
-# Variables de simulación (valores actuales)
-presion_simulada_kPa = PRESION_INICIAL
-temperatura_simulada = TEMPERATURA_INICIAL
+# Umbrales de Presión
+P_WARN_HIGH = 380.0
+P_EMERG_HIGH = 460.0
+P_RELIEF_TARGET = 350
 
-# --- UMBRALES DE PRESIÓN ---
-# Límites operativos para el sistema de distribución de vapor
-PRESION_ADVERTENCIA_ALTA = 380.0    # kPa - Umbral de advertencia
-PRESION_EMERGENCIA_ALTA = 460.0     # kPa - Activación automática de ESD
-PRESION_OBJETIVO_ALIVIO = 350       # kPa - Valor objetivo tras alivio
+# Umbrales de seguridad para presión baja
+P_WARN_LOW = 250.0  
+P_RECOVERY = 220.0  
 
-# Umbrales para presión baja (recuperación del sistema)
-PRESION_ADVERTENCIA_BAJA = 250.0    # kPa - Advertencia por baja presión
-PRESION_RECUPERACION = 220.0        # kPa - Activación de recuperación
+# Umbrales de Temperatura
+T_WARN_HIGH = 170.0
+T_EMERG_HIGH = 190.0
+T_PURGE_TRIGGER = 180.0
 
-# --- UMBRALES DE TEMPERATURA ---
-# Límites térmicos para garantizar calidad del vapor
-TEMPERATURA_ADVERTENCIA_ALTA = 170.0    # °C - Umbral de advertencia
-TEMPERATURA_EMERGENCIA_ALTA = 190.0     # °C - Activación automática de ESD
-TEMPERATURA_ACTIVACION_PURGA = 180.0    # °C - Activación de purga (no usado actualmente)
+# Umbrales de seguridad para temperatura baja
+T_WARN_LOW = 120.0  
+T_PREHEAT = 110.0  
 
-# Umbrales para temperatura baja (precalentamiento)
-TEMPERATURA_ADVERTENCIA_BAJA = 120.0    # °C - Advertencia por baja temperatura
-TEMPERATURA_PRECALENTAMIENTO = 110.0    # °C - Activación de precalentamiento
+# Margen para considerar que se ha alcanzado el valor inicial en modo ESD
+ESD_P_TOLERANCE = 5.0
+ESD_T_TOLERANCE = 3.0
 
-# --- TOLERANCIAS PARA MODO ESD ---
-# Márgenes aceptables para considerar que se alcanzaron los valores iniciales
-TOLERANCIA_PRESION_ESD = 5.0        # kPa - Tolerancia para presión
-TOLERANCIA_TEMPERATURA_ESD = 3.0     # °C - Tolerancia para temperatura
+MV_MIN = 0.0
+MV_MAX = 100.0
+MV_pct = 50.0
 
-# --- PARÁMETROS DE CONTROL ---
-# Rangos y configuraciones para válvulas y supercalentador
-VALVULA_MODULANTE_MIN = 0.0      # % - Apertura mínima válvula modulante
-VALVULA_MODULANTE_MAX = 100.0    # % - Apertura máxima válvula modulante
-porcentaje_valvula_modulante = 50.0  # % - Valor actual
+SH_MIN = 0.0
+SH_MAX = 100.0
+SH_cmd = 50.0
 
-SUPERCALENTADOR_MIN = 0.0        # % - Potencia mínima supercalentador
-SUPERCALENTADOR_MAX = 100.0      # % - Potencia máxima supercalentador
-comando_supercalentador = 50.0   # % - Valor actual
+ENC_SENSITIVITY_P = 2.0
+ENC_SENSITIVITY_T = 1.0
 
-# Sensibilidades del encoder para ajuste de parámetros
-SENSIBILIDAD_ENCODER_PRESION = 2.0       # Incremento por detent en modo presión
-SENSIBILIDAD_ENCODER_TEMPERATURA = 1.0  # Incremento por detent en modo temperatura
+mode = 0
+MODE_NAMES = ("PRESION", "TEMPERATURA")
 
-# --- MODOS DE OPERACIÓN ---
-# El encoder permite alternar entre control de presión y temperatura
-modo_actual = 0  # 0 = Presión, 1 = Temperatura
-NOMBRES_MODOS = ("PRESION", "TEMPERATURA")
+# Nuevos estados de seguridad
+pressure_recovery_active = False
+preheat_active = False
 
-# --- ESTADOS DE SEGURIDAD DEL SISTEMA ---
-# Flags para modos especiales de operación
-recuperacion_presion_activa = False  # Modo de recuperación por baja presión
-precalentamiento_activo = False      # Modo de precalentamiento por baja temperatura
+last_enc_sw_state = enc_sw.value
+last_enc_sw_time = time.monotonic()
+SW_DEBOUNCE_MS = 120
 
-# --- VARIABLES DE CONTROL DE INTERFAZ ---
-# Manejo de botones y temporización
-ultimo_estado_boton_encoder = boton_encoder.value
-ultimo_tiempo_boton_encoder = time.monotonic()
-TIEMPO_DEBOUNCE_MS = 120  # Tiempo de anti-rebote para botón
+esd_active = False
+esd_btn_state_last = btn_esd.value
+esd_ready_to_reset = False
 
-# Variables del sistema ESD
-esd_activo = False                           # Estado del sistema de paro de emergencia
-ultimo_estado_boton_esd = boton_esd.value   # Estado previo del botón ESD
-esd_listo_para_reinicio = False             # Flag que indica si se puede reiniciar
+last_update_time = time.monotonic()
+last_log = time.monotonic()
+standby_start_time = 0
+standby_duration = 3.0
+start_time = time.monotonic()
 
-# --- VARIABLES DE TEMPORIZACIÓN ---
-ultimo_tiempo_actualizacion = time.monotonic()
-ultimo_log = time.monotonic()
-tiempo_inicio_standby = 0
-duracion_standby = 3.0  # Segundos de pausa tras activación de válvulas
-tiempo_inicio = time.monotonic()
+last_enc_pos = encoder.position
 
-ultima_posicion_encoder = encoder.position
+def pwm_set_pct(pwm_obj, pct):
+    pct = max(0.0, min(100.0, pct))
+    pwm_obj.duty_cycle = int(pct / 100.0 * 65535)
 
-# =================================================================
-# FUNCIONES AUXILIARES
-# =================================================================
+def set_rgb(r8, g8, b8):
+    rgb_r.duty_cycle = int((r8 / 255.0) * 65535)
+    rgb_g.duty_cycle = int((g8 / 255.0) * 65535)
+    rgb_b.duty_cycle = int((b8 / 255.0) * 65535)
 
-def configurar_pwm_porcentaje(objeto_pwm, porcentaje):
-    """
-    Configura la salida PWM según un porcentaje (0-100%)
-    
-    Args:
-        objeto_pwm: Objeto PWMOut a configurar
-        porcentaje: Valor entre 0 y 100
-    """
-    porcentaje = max(0.0, min(100.0, porcentaje))
-    objeto_pwm.duty_cycle = int(porcentaje / 100.0 * 65535)
-
-def configurar_rgb(rojo, verde, azul):
-    """
-    Configura el color del LED RGB
-    
-    Args:
-        rojo, verde, azul: Valores entre 0-255 para cada canal
-    """
-    rgb_rojo.duty_cycle = int((rojo / 255.0) * 65535)
-    rgb_verde.duty_cycle = int((verde / 255.0) * 65535)
-    rgb_azul.duty_cycle = int((azul / 255.0) * 65535)
-
-# =================================================================
-# INICIO DEL PROGRAMA PRINCIPAL
-# =================================================================
-
-print("VaporSur S.A. - Sistema de Control y Supervisión")
-print("Iniciando firmware de control de vapor...")
-
-# =================================================================
-# BUCLE PRINCIPAL DEL SISTEMA
-# =================================================================
+print("VaporSur - Iniciando firmware")
 
 while True:
-    # --- ACTUALIZACIÓN DE TEMPORIZACIÓN ---
-    tiempo_actual = time.monotonic()
-    delta_tiempo = (tiempo_actual - ultimo_tiempo_actualizacion) / 2.0
-    ultimo_tiempo_actualizacion = tiempo_actual
+    now = time.monotonic()
+    dt = (now - last_update_time) / 2.0
+    last_update_time = now
 
-    # Pausa durante período de standby (tras activación de válvulas)
-    if tiempo_actual < tiempo_inicio_standby + duracion_standby:
+    if now < standby_start_time + standby_duration:
         time.sleep(0.05)
         continue
 
-    # =============================================================
-    # GESTIÓN DEL SISTEMA ESD (EMERGENCY SHUTDOWN)
-    # =============================================================
-    
-    # Detección de pulsación del botón ESD
-    estado_boton_esd = boton_esd.value
-    if estado_boton_esd != ultimo_estado_boton_esd and not estado_boton_esd:
-        # Flanco de bajada detectado (botón pulsado)
-        if not esd_activo:
-            # Activar ESD
-            esd_activo = True
-            esd_listo_para_reinicio = False
-            print("[ALERTA] Sistema ESD activado manualmente.")
-        elif esd_listo_para_reinicio:
-            # Reiniciar sistema (solo si está listo)
-            esd_activo = False
-            print("[INFO] Sistema ESD reiniciado. Retornando a operación normal.")
-    ultimo_estado_boton_esd = estado_boton_esd
+    # Lógica de detección de pulsación de ESD
+    esd_btn_state = btn_esd.value
+    if esd_btn_state != esd_btn_state_last and not esd_btn_state: # Detección de flanco de bajada (pulsación)
+        if not esd_active:
+            esd_active = True
+            esd_ready_to_reset = False
+            print("[ALERTA] ESD activado.")
+        elif esd_ready_to_reset:
+            esd_active = False
+            print("[INFO] ESD reseteado.")
+    esd_btn_state_last = esd_btn_state
 
-    # =============================================================
-    # LÓGICA DE OPERACIÓN NORMAL
-    # =============================================================
-    
-    if not esd_activo:
-        # --- LECTURA DEL ENCODER ROTATIVO ---
-        posicion_encoder_actual = encoder.position
-        delta_posicion = posicion_encoder_actual - ultima_posicion_encoder
-        ultima_posicion_encoder = posicion_encoder_actual
+    # ----------------- Lógica de operación normal (ahora con verificación de estado crítico) -----------------
+    if not esd_active:
+        current_enc_pos = encoder.position
+        delta_pos = current_enc_pos - last_enc_pos
+        last_enc_pos = current_enc_pos
         
         estado_sistema = "Normal"
         
-        # --- VERIFICACIÓN DE CONDICIONES CRÍTICAS ---
-        # Activación automática de ESD si se superan límites de emergencia
-        if presion_simulada_kPa >= PRESION_EMERGENCIA_ALTA or temperatura_simulada >= TEMPERATURA_EMERGENCIA_ALTA:
-            esd_activo = True
-            esd_listo_para_reinicio = False
+        # Nueva lógica para activar ESD automáticamente
+        if P_sim_kPa >= P_EMERG_HIGH or T_sim >= T_EMERG_HIGH:
+            esd_active = True
+            esd_ready_to_reset = False
             print("[ALERTA] Condición crítica detectada. Activando ESD automáticamente.")
         
-        # Solo continuar con operación normal si ESD no se activó automáticamente
-        if not esd_activo:
-            # --- GESTIÓN DE MODOS ESPECIALES DE SEGURIDAD ---
+        # Solo ejecutar la lógica de operación normal si el ESD no está activo
+        if not esd_active:
+            if P_sim_kPa <= P_RECOVERY and not pressure_recovery_active:
+                pressure_recovery_active = True
             
-            # Activación del modo de recuperación de presión
-            if presion_simulada_kPa <= PRESION_RECUPERACION and not recuperacion_presion_activa:
-                recuperacion_presion_activa = True
-                print("[INFO] Activando modo de recuperación de presión.")
-            
-            # Activación del modo de precalentamiento
-            if temperatura_simulada <= TEMPERATURA_PRECALENTAMIENTO and not precalentamiento_activo:
-                precalentamiento_activo = True
-                print("[INFO] Activando modo de precalentamiento.")
+            if T_sim <= T_PREHEAT and not preheat_active:
+                preheat_active = True
 
-            # Desactivación de modos especiales cuando se superan los umbrales
-            if recuperacion_presion_activa and presion_simulada_kPa > PRESION_RECUPERACION + 20:
-                recuperacion_presion_activa = False
-                print("[INFO] Finalizando modo de recuperación de presión.")
+            if pressure_recovery_active and P_sim_kPa > P_RECOVERY + 20:
+                pressure_recovery_active = False
 
-            if precalentamiento_activo and temperatura_simulada > TEMPERATURA_PRECALENTAMIENTO + 20:
-                precalentamiento_activo = False
-                print("[INFO] Finalizando modo de precalentamiento.")
+            if preheat_active and T_sim > T_PREHEAT + 20:
+                preheat_active = False
                 
-            # --- CONTROL MANUAL CON ENCODER ---
-            # Solo permitir ajustes manuales si no hay modos especiales activos
-            if not recuperacion_presion_activa and not precalentamiento_activo:
-                if modo_actual == 0:  # Modo control de presión
-                    porcentaje_valvula_modulante += delta_posicion * SENSIBILIDAD_ENCODER_PRESION
-                    porcentaje_valvula_modulante = max(VALVULA_MODULANTE_MIN, 
-                                                     min(VALVULA_MODULANTE_MAX, porcentaje_valvula_modulante))
-                else:  # Modo control de temperatura
-                    comando_supercalentador += delta_posicion * SENSIBILIDAD_ENCODER_TEMPERATURA
-                    comando_supercalentador = max(SUPERCALENTADOR_MIN, 
-                                                min(SUPERCALENTADOR_MAX, comando_supercalentador))
+            if not pressure_recovery_active and not preheat_active:
+                if mode == 0:
+                    MV_pct += delta_pos * ENC_SENSITIVITY_P
+                    MV_pct = max(MV_MIN, min(MV_MAX, MV_pct))
+                else:
+                    SH_cmd += delta_pos * ENC_SENSITIVITY_T
+                    SH_cmd = max(SH_MIN, min(SH_MAX, SH_cmd))
 
-            # --- APLICACIÓN DE MODOS ESPECIALES ---
-            
-            # Modo recuperación de presión: cerrar válvula modulante
-            if recuperacion_presion_activa:
-                porcentaje_valvula_modulante = 0.0
+            if pressure_recovery_active:
+                MV_pct = 0.0
                 estado_sistema = "Recuperación Presión"
             
-            # Modo precalentamiento: máxima potencia al supercalentador
-            if precalentamiento_activo:
-                comando_supercalentador = 100.0
+            if preheat_active:
+                SH_cmd = 100.0
                 estado_sistema = "Precalentamiento"
 
-            # --- APLICACIÓN DE COMANDOS A HARDWARE ---
-            configurar_pwm_porcentaje(pwm_valvula_modulante, porcentaje_valvula_modulante)
-            configurar_pwm_porcentaje(pwm_supercalentador, comando_supercalentador)
+            pwm_set_pct(pwm_mv, MV_pct)
+            pwm_set_pct(pwm_sh, SH_cmd)
 
-            # --- SIMULACIÓN DE LA FÍSICA DEL SISTEMA ---
+            if MV_pct < 50.0:
+                P_sim_kPa += (50.0 - MV_pct) * dt * 0.1
+            elif MV_pct > 50.0:
+                P_sim_kPa -= (MV_pct - 50.0) * dt * 0.1
             
-            # Simulación de presión basada en posición de válvula modulante
-            # Válvula cerrada (0%) aumenta presión, válvula abierta (>50%) la reduce
-            if porcentaje_valvula_modulante < 50.0:
-                presion_simulada_kPa += (50.0 - porcentaje_valvula_modulante) * delta_tiempo * 0.1
-            elif porcentaje_valvula_modulante > 50.0:
-                presion_simulada_kPa -= (porcentaje_valvula_modulante - 50.0) * delta_tiempo * 0.1
-            
-            # Simulación de temperatura basada en comando del supercalentador
-            # Potencia alta (>50%) aumenta temperatura, potencia baja la reduce
-            if comando_supercalentador > 50.0:
-                temperatura_simulada += (comando_supercalentador - 50.0) * delta_tiempo * 0.1
-            elif comando_supercalentador < 50.0:
-                temperatura_simulada -= (50.0 - comando_supercalentador) * delta_tiempo * 0.1
+            if SH_cmd > 50.0:
+                T_sim += (SH_cmd - 50.0) * dt * 0.1
+            elif SH_cmd < 50.0:
+                T_sim -= (50.0 - SH_cmd) * dt * 0.1
 
-            # Limitación de valores mínimos
-            presion_simulada_kPa = max(presion_simulada_kPa, 0)
-            temperatura_simulada = max(temperatura_simulada, 0)
+            P_sim_kPa = max(P_sim_kPa, 0)
+            T_sim = max(T_sim, 0)
 
-            # --- GESTIÓN DEL CAMBIO DE MODO CON BOTÓN DEL ENCODER ---
-            estado_boton = boton_encoder.value
-            if estado_boton != ultimo_estado_boton_encoder:
-                ultimo_tiempo_boton_encoder = tiempo_actual
-                ultimo_estado_boton_encoder = estado_boton
+            sw_state = enc_sw.value
+            if sw_state != last_enc_sw_state:
+                last_enc_sw_time = now
+                last_enc_sw_state = sw_state
             else:
-                # Botón presionado y tiempo de debounce superado
-                if (not estado_boton) and (tiempo_actual - ultimo_tiempo_boton_encoder) * 1000.0 > TIEMPO_DEBOUNCE_MS:
-                    # Cambiar modo de control
-                    modo_actual = 1 - modo_actual
-                    
-                    # Indicación visual del cambio de modo
-                    if modo_actual == 0:  # Modo presión
+                if (not sw_state) and (now - last_enc_sw_time) * 1000.0 > SW_DEBOUNCE_MS:
+                    mode = 1 - mode
+                    if mode == 0:
                         for _ in range(2):
-                            configurar_rgb(255, 255, 255); time.sleep(0.08)  # Blanco
-                            configurar_rgb(0, 160, 0); time.sleep(0.06)      # Verde
-                        print("[INFO] Cambiado a modo control de PRESIÓN")
-                    else:  # Modo temperatura
+                            set_rgb(255, 255, 255); time.sleep(0.08)
+                            set_rgb(0, 160, 0); time.sleep(0.06)
+                    else:
                         for _ in range(2):
-                            configurar_rgb(0, 120, 200); time.sleep(0.08)    # Azul
-                            configurar_rgb(0, 160, 0); time.sleep(0.06)      # Verde
-                        print("[INFO] Cambiado a modo control de TEMPERATURA")
-                    
-                    time.sleep(0.15)  # Pausa para evitar múltiples cambios
-                    ultimo_tiempo_boton_encoder = tiempo_actual
+                            set_rgb(0, 120, 200); time.sleep(0.08)
+                            set_rgb(0, 160, 0); time.sleep(0.06)
+                    time.sleep(0.15)
+                    last_enc_sw_time = now
 
-            # --- GESTIÓN DE VÁLVULAS DE SEGURIDAD ---
-            # Inicialización de estados
-            valvula_alivio.value = False
-            estado_alivio = "No"
-            sistema_purga_a.value = False
-            estado_purga = "No"
+            do_relief.value = False
+            relief_activo = "No"
+            do_purga_a.value = False
+            purga_activa = "No"
             
-            # NOTA: La lógica original de activación automática de válvulas fue removida
-            # para evitar reducciones forzadas de presión/temperatura
-            # Las válvulas solo se activan en modo ESD
+            # Se elimina la lógica de reducción forzada
+            # if P_sim_kPa >= P_EMERG_HIGH:
+            #     do_relief.value = True
+            #     relief_activo = "Si"
+            #     P_sim_kPa = P_RELIEF_TARGET
+            #     standby_start_time = now
+            #     estado_sistema = "Alivio Presión"
             
-            # --- SEÑALIZACIÓN LUMINOSA SEGÚN ESTADO DEL SISTEMA ---
-            
-            if valvula_alivio.value or sistema_purga_a.value:
-                # Rojo: Válvulas de emergencia activas
-                configurar_rgb(200, 0, 0)
-            elif recuperacion_presion_activa or precalentamiento_activo:
-                # Cian: Modos especiales de seguridad activos
-                configurar_rgb(0, 255, 255)
-            elif modo_actual == 0:  # Modo control de presión
-                if presion_simulada_kPa >= PRESION_ADVERTENCIA_ALTA or presion_simulada_kPa <= PRESION_ADVERTENCIA_BAJA:
-                    # Ámbar: Advertencia de presión
-                    configurar_rgb(200, 140, 0)
+            # if T_sim >= T_PURGE_TRIGGER:
+            #     do_purga_a.value = True
+            #     purga_activa = "Si"
+            #     T_sim = 150.0
+            #     standby_start_time = now
+            #     estado_sistema = "Purga de Condensado"
+
+            if do_relief.value or do_purga_a.value:
+                set_rgb(200, 0, 0)
+            elif pressure_recovery_active or preheat_active:
+                set_rgb(0, 255, 255)
+            elif mode == 0:
+                if P_sim_kPa >= P_WARN_HIGH or P_sim_kPa <= P_WARN_LOW:
+                    set_rgb(200, 140, 0)
                     estado_sistema = "Advertencia Presión"
                 else:
-                    # Verde: Operación normal
-                    configurar_rgb(0, 160, 0)
+                    set_rgb(0, 160, 0)
                     estado_sistema = "Normal"
-            elif modo_actual == 1:  # Modo control de temperatura
-                if temperatura_simulada >= TEMPERATURA_EMERGENCIA_ALTA or temperatura_simulada <= TEMPERATURA_ADVERTENCIA_BAJA:
-                    # Rojo: Corrección crítica de temperatura
-                    configurar_rgb(200, 0, 0)
+            elif mode == 1:
+                if T_sim >= T_EMERG_HIGH or T_sim <= T_WARN_LOW:
+                    set_rgb(200, 0, 0)
                     estado_sistema = "Corrección Temperatura"
-                elif temperatura_simulada >= TEMPERATURA_ADVERTENCIA_ALTA:
-                    # Ámbar: Advertencia de temperatura
-                    configurar_rgb(200, 140, 0)
+                elif T_sim >= T_WARN_HIGH:
+                    set_rgb(200, 140, 0)
                     estado_sistema = "Advertencia Temperatura"
                 else:
-                    # Verde: Operación normal
-                    configurar_rgb(0, 160, 0)
+                    set_rgb(0, 160, 0)
                     estado_sistema = "Normal"
 
-            # --- GESTIÓN DE FLUJOS DE DISTRIBUCIÓN ---
-            # Determinación del tipo de flujo según condiciones de presión y temperatura
-            
-            estado_flujo = "None"
-            led_flujo_encendido = False
+            flow_state = "None"
+            flow_led_on = False
 
-            # Solo evaluar flujos si no hay modos especiales activos
-            if not recuperacion_presion_activa and not precalentamiento_activo:
-                # Flujo A: Procesos que requieren grandes volúmenes a presión constante
-                if (presion_simulada_kPa >= 310 and presion_simulada_kPa <= 350) and \
-                   (temperatura_simulada >= 140 and temperatura_simulada <= 160):
-                    estado_flujo = "A"
-                    # LED parpadeante para Flujo A
-                    if int(tiempo_actual * 5) % 2 == 0:
-                        led_flujo_encendido = True
+            if not pressure_recovery_active and not preheat_active:
+                if (P_sim_kPa >= 310 and P_sim_kPa <= 350) and (T_sim >= 140 and T_sim <= 160):
+                    flow_state = "A"
+                    if int(now * 5) % 2 == 0:
+                        flow_led_on = True
                     else:
-                        led_flujo_encendido = False
-                        
-                # Flujo B: Procesos sensibles que requieren vapor seco y temperatura regulada
-                elif (presion_simulada_kPa >= 260 and presion_simulada_kPa <= 300) and \
-                     (temperatura_simulada >= 160 and temperatura_simulada <= 170):
-                    estado_flujo = "B"
-                    led_flujo_encendido = True  # LED continuo para Flujo B
+                        flow_led_on = False
+                elif (P_sim_kPa >= 260 and P_sim_kPa <= 300) and (T_sim >= 160 and T_sim <= 170):
+                    flow_state = "B"
+                    flow_led_on = True
                 else:
-                    # Sin flujo: Condiciones no apropiadas para distribución
-                    estado_flujo = "None"
-                    led_flujo_encendido = False
+                    flow_state = "None"
+                    flow_led_on = False
             
-            # Aplicar estado del LED de flujo
-            led_flujo.value = led_flujo_encendido
-            
-            # El láser se enciende cuando hay válvulas de seguridad activas
-            laser_indicador.value = valvula_alivio.value or sistema_purga_a.value
+            do_flow.value = flow_led_on
+            do_laser.value = do_relief.value or do_purga_a.value
 
-    # =============================================================
-    # LÓGICA DEL MODO ESD (EMERGENCY SHUTDOWN)
-    # =============================================================
-    
-    if esd_activo:
-        # Obtener valores actuales para control
-        presion_actual = presion_simulada_kPa
-        temperatura_actual = temperatura_simulada
+    # ----------------- Lógica del modo ESD -----------------
+    if esd_active:
+        current_P = P_sim_kPa
+        current_T = T_sim
         estado_sistema = "No Listo para el Reinicio"
-        estado_alivio = "No"
-        estado_purga = "No"
+        relief_activo = "No"
+        purga_activa = "No"
         
-        # --- CONTROL AUTOMÁTICO DE PRESIÓN EN MODO ESD ---
-        # Objetivo: Retornar a la presión inicial (300 kPa)
-        if abs(presion_actual - PRESION_INICIAL) > TOLERANCIA_PRESION_ESD:
-            if presion_actual > PRESION_INICIAL:
-                # Presión alta: Activar válvula de alivio
-                valvula_alivio.value = True
-                estado_alivio = "Si"
-                porcentaje_valvula_modulante = 50.0  # Posición neutra
-                # Reducción acelerada de presión
-                presion_simulada_kPa -= (presion_actual - PRESION_INICIAL) * delta_tiempo * 0.2
-            else:
-                # Presión baja: Cerrar válvula modulante para aumentar presión
-                valvula_alivio.value = False
-                estado_alivio = "No"
-                porcentaje_valvula_modulante = 0.0  # Válvula cerrada
+        # Lógica de control de presión en modo ESD
+        if abs(current_P - P_INITIAL) > ESD_P_TOLERANCE:
+            if current_P > P_INITIAL:
+                do_relief.value = True
+                relief_activo = "Si"
+                MV_pct = 50.0
+                # Aumentamos la tasa de disminución de la presión
+                P_sim_kPa -= (current_P - P_INITIAL) * dt * 0.2 
+            else: 
+                do_relief.value = False
+                relief_activo = "No"
+                MV_pct = 0.0
         else:
-            # Presión dentro de tolerancia: Estado normal
-            valvula_alivio.value = False
-            estado_alivio = "No"
-            porcentaje_valvula_modulante = 50.0  # Posición neutra
+            do_relief.value = False
+            relief_activo = "No"
+            MV_pct = 50.0
             
-        # --- CONTROL AUTOMÁTICO DE TEMPERATURA EN MODO ESD ---
-        # Objetivo: Retornar a la temperatura inicial (150°C)
-        if abs(temperatura_actual - TEMPERATURA_INICIAL) > TOLERANCIA_TEMPERATURA_ESD:
-            if temperatura_actual > TEMPERATURA_INICIAL:
-                # Temperatura alta: Activar purga y reducir supercalentador
-                sistema_purga_a.value = True
-                estado_purga = "Si"
-                comando_supercalentador = 50.0  # Potencia neutra
-                # Reducción acelerada de temperatura
-                temperatura_simulada -= (temperatura_actual - TEMPERATURA_INICIAL) * delta_tiempo * 0.2
-            else:
-                # Temperatura baja: Aumentar potencia del supercalentador
-                sistema_purga_a.value = False
-                estado_purga = "No"
-                comando_supercalentador = 100.0  # Máxima potencia
+        # Lógica de control de temperatura en modo ESD
+        if abs(current_T - T_INITIAL) > ESD_T_TOLERANCE:
+            if current_T > T_INITIAL:
+                do_purga_a.value = True
+                purga_activa = "Si"
+                SH_cmd = 50.0
+                # Aumentamos la tasa de disminución de la temperatura
+                T_sim -= (current_T - T_INITIAL) * dt * 0.2 
+            else: 
+                do_purga_a.value = False
+                purga_activa = "No"
+                SH_cmd = 100.0
         else:
-            # Temperatura dentro de tolerancia: Estado normal
-            sistema_purga_a.value = False
-            estado_purga = "No"
-            comando_supercalentador = 50.0  # Potencia neutra
+            do_purga_a.value = False
+            purga_activa = "No"
+            SH_cmd = 50.0
 
-        # --- VERIFICACIÓN DE CONDICIONES PARA REINICIO ---
-        # El sistema está listo para reinicio cuando ambas variables están en tolerancia
-        if abs(presion_simulada_kPa - PRESION_INICIAL) <= TOLERANCIA_PRESION_ESD and \
-           abs(temperatura_simulada - TEMPERATURA_INICIAL) <= TOLERANCIA_TEMPERATURA_ESD:
-            esd_listo_para_reinicio = True
+        if abs(P_sim_kPa - P_INITIAL) <= ESD_P_TOLERANCE and abs(T_sim - T_INITIAL) <= ESD_T_TOLERANCE:
+            esd_ready_to_reset = True
             estado_sistema = "Listo para el Reinicio"
             
-        # --- CONTINUACIÓN DE LA SIMULACIÓN FÍSICA EN MODO ESD ---
-        # La simulación continúa pero con control automático
+        if MV_pct < 50.0:
+            P_sim_kPa += (50.0 - MV_pct) * dt * 0.1
+        elif MV_pct > 50.0 and not do_relief.value:
+            P_sim_kPa -= (MV_pct - 50.0) * dt * 0.1
         
-        if porcentaje_valvula_modulante < 50.0:
-            presion_simulada_kPa += (50.0 - porcentaje_valvula_modulante) * delta_tiempo * 0.1
-        elif porcentaje_valvula_modulante > 50.0 and not valvula_alivio.value:
-            presion_simulada_kPa -= (porcentaje_valvula_modulante - 50.0) * delta_tiempo * 0.1
-        
-        if comando_supercalentador > 50.0 and not sistema_purga_a.value:
-            temperatura_simulada += (comando_supercalentador - 50.0) * delta_tiempo * 0.1
-        elif comando_supercalentador < 50.0:
-            temperatura_simulada -= (50.0 - comando_supercalentador) * delta_tiempo * 0.1
+        if SH_cmd > 50.0 and not do_purga_a.value:
+            T_sim += (SH_cmd - 50.0) * dt * 0.1
+        elif SH_cmd < 50.0:
+            T_sim -= (50.0 - SH_cmd) * dt * 0.1
 
-        # Limitación de valores mínimos
-        presion_simulada_kPa = max(presion_simulada_kPa, 0)
-        temperatura_simulada = max(temperatura_simulada, 0)
+        P_sim_kPa = max(P_sim_kPa, 0)
+        T_sim = max(T_sim, 0)
 
-        # --- SEÑALIZACIÓN LUMINOSA EN MODO ESD ---
-        if esd_listo_para_reinicio:
-            # Verde sólido: Sistema listo para reinicio
-            configurar_rgb(0, 160, 0)
+        if esd_ready_to_reset:
+            set_rgb(0, 160, 0)
         else:
-            # Rojo parpadeante: Sistema en proceso de estabilización
-            if int(tiempo_actual * 2) % 2 == 0:
-                configurar_rgb(200, 0, 0)  # Rojo
-            else:
-                configurar_rgb(0, 0, 0)    # Apagado
+            if int(now * 2) % 2 == 0: set_rgb(200, 0, 0)
+            else: set_rgb(0, 0, 0)
         
-        # En modo ESD no hay flujo de distribución
-        led_flujo.value = False
-        
-        # El láser indica válvulas activas
-        laser_indicador.value = valvula_alivio.value or sistema_purga_a.value
+        do_flow.value = False
+        do_laser.value = do_relief.value or do_purga_a.value
 
-    # =============================================================
-    # REGISTRO Y MONITOREO DEL SISTEMA
-    # =============================================================
-    
-    # Envío periódico de datos al puerto serial para monitoreo
-    if tiempo_actual - ultimo_log > 0.1:  # Cada 100ms
-        datos_salida = "P:{:.1f},T:{:.1f},MV:{:.1f},SH:{:.1f},F:{},M:{},ESD:{},ESTADO:{},RELIEF:{},PURGE:{}".format(
-            presion_simulada_kPa,           # Presión actual (kPa)
-            temperatura_simulada,           # Temperatura actual (°C)
-            porcentaje_valvula_modulante,   # Apertura válvula modulante (%)
-            comando_supercalentador,        # Potencia supercalentador (%)
-            estado_flujo if 'estado_flujo' in locals() else "None",  # Tipo de flujo activo
-            NOMBRES_MODOS[modo_actual],     # Modo de control actual
-            "Activado" if esd_activo else "Desactivado",  # Estado ESD
-            estado_sistema,                 # Estado general del sistema
-            estado_alivio,                  # Estado válvula de alivio
-            estado_purga                    # Estado sistema de purga
+    if now - last_log > 0.1:
+        output_data = "P:{:.1f},T:{:.1f},MV:{:.1f},SH:{:.1f},F:{},M:{},ESD:{},ESTADO:{},RELIEF:{},PURGE:{}".format(
+            P_sim_kPa, T_sim, MV_pct, SH_cmd, flow_state if 'flow_state' in locals() else "None", MODE_NAMES[mode], "Activado" if esd_active else "Desactivado", estado_sistema, relief_activo, purga_activa
         )
-        print(datos_salida)
-        ultimo_log = tiempo_actual
+        print(output_data)
+        last_log = now
         
-    # Pausa para no saturar el procesador
     time.sleep(0.01)
